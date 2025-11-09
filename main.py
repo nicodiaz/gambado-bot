@@ -1,103 +1,94 @@
 import os
 import asyncio
-import threading
-import nest_asyncio
-import requests
-from datetime import datetime
-from flask import Flask
+import aiohttp
+from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from flask import Flask
 
-nest_asyncio.apply()
-
+# --- Configuración segura ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = int(os.getenv("CHAT_ID"))  # configurado en Render como variable de entorno
+PORT = int(os.getenv("PORT", 10000))
 
-app = Flask(__name__)
+# --- Estación INA Puerto de Tigre ---
+INA_API_URL = "https://alerta.ina.gob.ar/api/levels/PUERTODETIGRE"
 
-# --- CONFIGURACIÓN ---
-UMBRAL_BAJO = 0.45   # metros - nivel mínimo para navegar
-UMBRAL_ALTO = 0.75   # metros - nivel alto (opcional)
-URL_SHN = "https://www.hidro.gov.ar/oceanografia/alturashorarias.asp"
+# --- Umbral de alerta ---
+ALERTA_UMBRAL = 0.8
 
-@app.route("/")
-def home():
-    return "✅ Bot de niveles de agua corriendo y monitoreando el Arroyo Gambado (San Fernando)."
-
-# --- FUNCIÓN PARA OBTENER NIVEL ACTUAL ---
-def obtener_nivel_san_fernando():
-    try:
-        response = requests.get(URL_SHN, timeout=10)
-        response.raise_for_status()
-        texto = response.text
-
-        # Buscamos el valor de San Fernando en la tabla HTML
-        # La página del SHN tiene el formato "San Fernando" seguido de valores horarios
-        if "San Fernando" in texto:
-            seccion = texto.split("San Fernando")[1][:300]  # corto cerca de 300 chars después
-            # Busco números tipo 1.23 o 0.56 (altura en metros)
-            import re
-            match = re.search(r"(\d+\.\d+)", seccion)
-            if match:
-                return float(match.group(1))
-        return None
-    except Exception as e:
-        print(f"⚠️ Error obteniendo nivel: {e}")
-        return None
-
-# --- COMANDOS DEL BOT ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🌊 Bot activo.\nTe avisaré si el nivel del agua está demasiado bajo para navegar."
-    )
-
-async def nivel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nivel_actual = obtener_nivel_san_fernando()
-    if nivel_actual is None:
-        await update.message.reply_text("⚠️ No pude obtener el nivel actual del agua.")
-    else:
-        mensaje = f"📍 Nivel actual San Fernando: {nivel_actual:.2f} m"
-        if nivel_actual < UMBRAL_BAJO:
-            mensaje += "\n🚨 Nivel bajo, no se recomienda navegar."
-        elif nivel_actual > UMBRAL_ALTO:
-            mensaje += "\n🌊 Nivel alto, precaución."
-        else:
-            mensaje += "\n✅ Nivel normal, navegación posible."
-        await update.message.reply_text(mensaje)
-
-# --- ALERTAS AUTOMÁTICAS ---
-async def verificar_nivel_periodicamente(bot):
-    while True:
+# --- Función para obtener el nivel del agua ---
+async def obtener_nivel():
+    async with aiohttp.ClientSession() as session:
         try:
-            nivel_actual = obtener_nivel_san_fernando()
-            if nivel_actual is not None:
-                print(f"[{datetime.now().strftime('%H:%M')}] Nivel: {nivel_actual} m")
-                if nivel_actual < UMBRAL_BAJO:
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=f"🚨 Nivel bajo detectado ({nivel_actual:.2f} m). No conviene salir 🚤"
-                    )
-            await asyncio.sleep(3600)  # verifica cada 1 hora
+            async with session.get(INA_API_URL, timeout=10) as response:
+                if response.status != 200:
+                    return None, None
+                data = await response.json()
+
+                # El valor más reciente está en data["values"][-1]
+                valores = data.get("values", [])
+                if not valores:
+                    return None, None
+
+                ultimo = valores[-1]
+                nivel = ultimo.get("value")
+                fecha = datetime.fromisoformat(ultimo.get("timestamp").replace("Z", "+00:00"))
+                return nivel, fecha
         except Exception as e:
-            print(f"Error en verificación: {e}")
-            await asyncio.sleep(600)  # si hay error, reintenta en 10 min
+            print(f"Error obteniendo nivel: {e}")
+            return None, None
 
-# --- INICIO DEL BOT ---
-async def iniciar_bot():
+# --- Evaluar nivel ---
+def interpretar_nivel(nivel: float) -> str:
+    if nivel < 0.8:
+        return "🚫 Nivel bajo — posible dificultad para navegar el Gambado."
+    elif nivel < 1.2:
+        return "🚤 Navegable con precaución."
+    else:
+        return "🌊 Nivel normal — navegación sin problemas."
+
+# --- Comando /nivel ---
+async def comando_nivel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nivel, fecha = await obtener_nivel()
+    if nivel is None:
+        await update.message.reply_text("No pude obtener el nivel actual del agua 😔")
+        return
+
+    info = interpretar_nivel(nivel)
+    fecha_local = fecha.astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+    mensaje = f"📍 *Puerto de Tigre (INA)*\nNivel actual: *{nivel:.2f} m*\n{info}\nÚltima actualización: {fecha_local}"
+    await update.message.reply_markdown(mensaje)
+
+# --- Tarea automática de verificación ---
+async def monitorear_nivel(app):
+    await app.bot.send_message(chat_id=CHAT_ID, text="🤖 Bot de nivel del Gambado iniciado correctamente.")
+    while True:
+        nivel, fecha = await obtener_nivel()
+        if nivel is not None and nivel < ALERTA_UMBRAL:
+            info = interpretar_nivel(nivel)
+            fecha_local = fecha.astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+            mensaje = f"🚨 *Alerta de nivel bajo*\nNivel actual: *{nivel:.2f} m*\n{info}\nHora: {fecha_local}"
+            await app.bot.send_message(chat_id=CHAT_ID, text=mensaje, parse_mode="Markdown")
+        await asyncio.sleep(1800)  # cada 30 minutos
+
+# --- Flask (para Render) ---
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "Bot de nivel del Gambado corriendo correctamente."
+
+# --- Iniciar bot ---
+async def main():
     app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_telegram.add_handler(CommandHandler("start", start))
-    app_telegram.add_handler(CommandHandler("nivel", nivel))
+    app_telegram.add_handler(CommandHandler("nivel", comando_nivel))
 
-    # Tarea paralela de monitoreo
-    asyncio.create_task(verificar_nivel_periodicamente(app_telegram.bot))
+    asyncio.create_task(monitorear_nivel(app_telegram))
+    await app_telegram.run_polling()
 
-    print("🤖 Bot escuchando en Telegram y monitoreando niveles...")
-    await app_telegram.run_polling(stop_signals=None)
-
-def run_bot():
-    asyncio.run(iniciar_bot())
-
+# --- Ejecutar todo ---
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    import threading
+    threading.Thread(target=lambda: app_flask.run(host="0.0.0.0", port=PORT)).start()
+    asyncio.run(main())
