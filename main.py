@@ -1,5 +1,6 @@
 import os
 import asyncio
+import threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -9,32 +10,34 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 app = Flask(__name__)
 
-# Ruta base para que Render confirme que está activo
+# --- RUTA PRINCIPAL ---
 @app.route("/")
 def home():
-    return "Bot de niveles de agua corriendo ✅"
+    return "✅ Bot de niveles de agua corriendo y escuchando en Telegram."
 
-# Comando /start en Telegram
+# --- HANDLERS DE TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🌊 Bot activo. Te avisaré si el nivel de agua no permite navegar.")
 
-# Notificación de ejemplo
-async def enviar_alerta():
-    app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
-    await app_telegram.bot.send_message(
-        chat_id=CHAT_ID,
-        text="🚤 Alerta automática: el nivel de agua está bajo, no conviene salir."
-    )
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Podés usar /start para activar las alertas automáticas.")
 
-async def run_bot():
+# --- FUNCIÓN DEL BOT ---
+async def iniciar_bot():
     app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
     app_telegram.add_handler(CommandHandler("start", start))
+    app_telegram.add_handler(CommandHandler("help", help_cmd))
+    print("🤖 Bot escuchando en Telegram...")
     await app_telegram.run_polling()
 
-def main():
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+# --- EJECUCIÓN PARALELA ---
+def run_asyncio_bot():
+    asyncio.run(iniciar_bot())
 
 if __name__ == "__main__":
-    main()
+    # Hilo separado para el bot
+    bot_thread = threading.Thread(target=run_asyncio_bot)
+    bot_thread.start()
+
+    # Mantiene Flask vivo para Render
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
