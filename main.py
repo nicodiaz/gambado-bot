@@ -89,6 +89,9 @@ async def main():
 
 # --- Ejecutar todo ---
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=lambda: app_flask.run(host="0.0.0.0", port=PORT)).start()
-    asyncio.run(main())
+    try:
+        asyncio.get_event_loop().run_until_complete(main())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
