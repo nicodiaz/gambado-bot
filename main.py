@@ -1,9 +1,12 @@
 import os
 import asyncio
 import threading
+import nest_asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+nest_asyncio.apply()  # ✅ Permite múltiples loops asincrónicos
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -21,23 +24,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Usá /start para activar las alertas automáticas.")
 
-# --- Lógica del bot ---
+# --- Inicialización del bot ---
 async def iniciar_bot():
     app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
     app_telegram.add_handler(CommandHandler("start", start))
     app_telegram.add_handler(CommandHandler("help", help_cmd))
     print("🤖 Bot escuchando en Telegram...")
-    # 🟢 Evita los errores de 'set_wakeup_fd' en hilo secundario
     await app_telegram.run_polling(stop_signals=None)
 
-# --- Hilo separado para el bot ---
-def run_asyncio_bot():
+# --- Ejecución paralela ---
+def run_bot():
     asyncio.run(iniciar_bot())
 
 if __name__ == "__main__":
-    # Inicia el bot en un hilo aparte
-    bot_thread = threading.Thread(target=run_asyncio_bot, daemon=True)
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-
-    # Mantiene Flask activo (Render lo necesita)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
