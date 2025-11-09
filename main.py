@@ -89,9 +89,11 @@ async def main():
 
 # --- Ejecutar todo ---
 if __name__ == "__main__":
+    import nest_asyncio
+    nest_asyncio.apply()  # <-- Esto permite reusar loops existentes sin conflictos
+
     try:
-        asyncio.get_event_loop().run_until_complete(main())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
+        asyncio.get_event_loop().create_task(main())
+        asyncio.get_event_loop().run_forever()
+    except KeyboardInterrupt:
+        pass
