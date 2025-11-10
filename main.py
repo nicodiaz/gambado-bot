@@ -51,13 +51,13 @@ async def obtener_nivel():
     url = f"https://www.hidro.gob.ar/api/v1/AlturasHorarias/{MAREOGRAFO}/{fecha_str}"
 
     try:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as response:
-            logger.info(f"Llamando a {url}")
-            if response.status != 200:
-                logger.error(f"Error HTTP {response.status} al consultar {url}")
-                return None, None
-            data = await response.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                logger.info(f"Llamando a {url}")
+                if response.status != 200:
+                    logger.error(f"Error HTTP {response.status} al consultar {url}")
+                    return None, None
+                data = await response.json()
     except Exception as e:
         logger.exception(f"Error obteniendo nivel desde SHN: {e}")
         return None, None
