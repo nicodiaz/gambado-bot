@@ -42,48 +42,45 @@ async def obtener_nivel():
     """
     Llama a la API del SHN:
     https://www.hidro.gob.ar/api/v1/AlturasHorarias/SFER/YYYYMMDDHHMM
-
     Devuelve (nivel_en_m, fecha_datetime) o (None, None)
     """
-    # La API parece usar hora local argentina en el path.
-    ahora_ar = datetime.utcnow() - timedelta(hours=3)  # UTC-3
+    ahora_ar = datetime.utcnow() - timedelta(hours=3)
     fecha_str = ahora_ar.strftime("%Y%m%d%H%M")
     url = f"https://www.hidro.gob.ar/api/v1/AlturasHorarias/{MAREOGRAFO}/{fecha_str}"
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                logger.info(f"Llamando a {url}")
-                if response.status != 200:
-                    logger.error(f"Error HTTP {response.status} al consultar {url}")
-                    return None, None
-                data = await response.json()
-    except Exception as e:
-        logger.exception(f"Error obteniendo nivel desde SHN: {e}")
-        return None, None
+    for intento in range(2):  # reintenta una vez
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=20) as response:
+                    logger.info(f"[{intento+1}] Llamando a {url}")
+                    if response.status != 200:
+                        logger.warning(f"HTTP {response.status} en intento {intento+1}")
+                        # Si la hora no tiene datos, probamos 30 min antes
+                        if intento == 0:
+                            ahora_ar -= timedelta(minutes=30)
+                            fecha_str = ahora_ar.strftime("%Y%m%d%H%M")
+                            url = f"https://www.hidro.gob.ar/api/v1/AlturasHorarias/{MAREOGRAFO}/{fecha_str}"
+                        continue
 
+                    data = await response.json()
+                    lecturas = data.get("lecturas", [])
+                    if not lecturas:
+                        logger.warning("Respuesta sin lecturas.")
+                        return None, None
 
-    # El JSON tiene dos listas: "astronomica" y "lecturas"
-    lecturas = data.get("lecturas") or []
-    if not lecturas:
-        print("SHN: no hay lecturas en la respuesta")
-        return None, None
+                    ultima = lecturas[-1]
+                    nivel = ultima.get("altura")
+                    fecha_str_json = ultima.get("fecha")
+                    fecha_dt = datetime.fromisoformat(fecha_str_json)
+                    return float(nivel), fecha_dt
 
-    # Tomamos la última lectura real
-    ultima = lecturas[-1]
-    nivel = ultima.get("altura")
-    fecha_str_json = ultima.get("fecha")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout al consultar {url} (intento {intento+1})")
+        except Exception as e:
+            logger.exception(f"Error obteniendo nivel desde SHN (intento {intento+1}): {e}")
 
-    if nivel is None or not fecha_str_json:
-        return None, None
-
-    # parseo de fecha
-    try:
-        fecha_dt = datetime.fromisoformat(fecha_str_json)
-    except Exception:
-        fecha_dt = None
-
-    return float(nivel), fecha_dt
+    logger.error("No se pudo obtener el nivel del agua tras varios intentos.")
+    return None, None
 
 # --------------------------------------------------------------------------
 # 2) INTERPRETAR NIVEL
