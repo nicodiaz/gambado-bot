@@ -1,7 +1,7 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
@@ -11,66 +11,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))  # configurado en Render como variable de entorno
 PORT = int(os.getenv("PORT", 10000))
 
-# --- Estación INA Puerto de Tigre ---
-INA_API_URL = "https://alerta.ina.gob.ar/api/levels/PUERTODETIGRE"
+# --- Estación SHN San Fernando ---
+# código de mareógrafo que encontraste: SFER
+MAREOGRAFO = "SFER"
 
-# --- Umbral de alerta ---
-ALERTA_UMBRAL = 0.8
-
-# --- Función para obtener el nivel del agua ---
-async def obtener_nivel():
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(INA_API_URL, timeout=10) as response:
-                if response.status != 200:
-                    return None, None
-                data = await response.json()
-
-                # El valor más reciente está en data["values"][-1]
-                valores = data.get("values", [])
-                if not valores:
-                    return None, None
-
-                ultimo = valores[-1]
-                nivel = ultimo.get("value")
-                fecha = datetime.fromisoformat(ultimo.get("timestamp").replace("Z", "+00:00"))
-                return nivel, fecha
-        except Exception as e:
-            print(f"Error obteniendo nivel: {e}")
-            return None, None
-
-# --- Evaluar nivel ---
-def interpretar_nivel(nivel: float) -> str:
-    if nivel < 0.8:
-        return "🚫 Nivel bajo — posible dificultad para navegar el Gambado."
-    elif nivel < 1.2:
-        return "🚤 Navegable con precaución."
-    else:
-        return "🌊 Nivel normal — navegación sin problemas."
-
-# --- Comando /nivel ---
-async def comando_nivel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nivel, fecha = await obtener_nivel()
-    if nivel is None:
-        await update.message.reply_text("No pude obtener el nivel actual del agua 😔")
-        return
-
-    info = interpretar_nivel(nivel)
-    fecha_local = fecha.astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
-    mensaje = f"📍 *Puerto de Tigre (INA)*\nNivel actual: *{nivel:.2f} m*\n{info}\nÚltima actualización: {fecha_local}"
-    await update.message.reply_markdown(mensaje)
-
-# --- Tarea automática de verificación ---
-async def monitorear_nivel(app):
-    await app.bot.send_message(chat_id=CHAT_ID, text="🤖 Bot de nivel del Gambado iniciado correctamente.")
-    while True:
-        nivel, fecha = await obtener_nivel()
-        if nivel is not None and nivel < ALERTA_UMBRAL:
-            info = interpretar_nivel(nivel)
-            fecha_local = fecha.astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
-            mensaje = f"🚨 *Alerta de nivel bajo*\nNivel actual: *{nivel:.2f} m*\n{info}\nHora: {fecha_local}"
-            await app.bot.send_message(chat_id=CHAT_ID, text=mensaje, parse_mode="Markdown")
-        await asyncio.sleep(1800)  # cada 30 minutos
+# --- Umbral de alerta (ajustá a tu lancha) ---
+ALERTA_UMBRAL = os.getenv("ALERTA_UMBRAL")  # metros aprox
 
 # --- Flask (para Render) ---
 app_flask = Flask(__name__)
@@ -79,21 +25,151 @@ app_flask = Flask(__name__)
 def home():
     return "Bot de nivel del Gambado corriendo correctamente."
 
-# --- Iniciar bot ---
+# --------------------------------------------------------------------------
+# 1) OBTENER NIVEL DESDE SHN
+# --------------------------------------------------------------------------
+async def obtener_nivel():
+    """
+    Llama a la API del SHN:
+    https://www.hidro.gob.ar/api/v1/AlturasHorarias/SFER/YYYYMMDDHHMM
+
+    Devuelve (nivel_en_m, fecha_datetime) o (None, None)
+    """
+    # La API parece usar hora local argentina en el path.
+    ahora_ar = datetime.utcnow() - timedelta(hours=3)  # UTC-3
+    fecha_str = ahora_ar.strftime("%Y%m%d%H%M")
+    url = f"https://www.hidro.gob.ar/api/v1/AlturasHorarias/{MAREOGRAFO}/{fecha_str}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    print(f"Error HTTP {response.status} al consultar {url}")
+                    return None, None
+                data = await response.json()
+    except Exception as e:
+        print(f"Error obteniendo nivel desde SHN: {e}")
+        return None, None
+
+    # El JSON tiene dos listas: "astronomica" y "lecturas"
+    lecturas = data.get("lecturas") or []
+    if not lecturas:
+        print("SHN: no hay lecturas en la respuesta")
+        return None, None
+
+    # Tomamos la última lectura real
+    ultima = lecturas[-1]
+    nivel = ultima.get("altura")
+    fecha_str_json = ultima.get("fecha")
+
+    if nivel is None or not fecha_str_json:
+        return None, None
+
+    # parseo de fecha
+    try:
+        fecha_dt = datetime.fromisoformat(fecha_str_json)
+    except Exception:
+        fecha_dt = None
+
+    return float(nivel), fecha_dt
+
+# --------------------------------------------------------------------------
+# 2) INTERPRETAR NIVEL
+# --------------------------------------------------------------------------
+def interpretar_nivel(nivel: float) -> str:
+    # podés ajustar estos umbrales a tu realidad del Gambado
+    if nivel < 0.60:
+        return "🚫 Nivel muy bajo — salir es riesgoso."
+    elif nivel < 0.80:
+        return "⚠️ Nivel bajo — posible dificultad para navegar el Gambado."
+    elif nivel < 1.20:
+        return "🚤 Navegable con precaución."
+    else:
+        return "🌊 Nivel normal — navegación sin problemas."
+
+# --------------------------------------------------------------------------
+# 3) COMANDO /nivel
+# --------------------------------------------------------------------------
+async def comando_nivel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nivel, fecha = await obtener_nivel()
+    if nivel is None:
+        await update.message.reply_text("No pude obtener el nivel actual del agua 😔")
+        return
+
+    info = interpretar_nivel(nivel)
+
+    if fecha is not None:
+        # pasar a horario ARG
+        fecha_local = (fecha - timedelta(hours=0)).astimezone(timezone(timedelta(hours=-3)))
+        fecha_str = fecha_local.strftime("%d/%m/%Y %H:%M")
+    else:
+        fecha_str = "sin fecha"
+
+    mensaje = (
+        f"📍 *San Fernando (SHN – {MAREOGRAFO})*\n"
+        f"Nivel actual: *{nivel:.2f} m*\n"
+        f"{info}\n"
+        f"Última lectura: {fecha_str}"
+    )
+    await update.message.reply_markdown(mensaje)
+
+# --------------------------------------------------------------------------
+# 4) TAREA AUTOMÁTICA (cada 30 minutos)
+# --------------------------------------------------------------------------
+async def monitorear_nivel(app):
+    # mensaje de arranque
+    await app.bot.send_message(
+        chat_id=CHAT_ID,
+        text="🤖 Bot del Gambado iniciado. Monitoreo cada 30 minutos."
+    )
+    while True:
+        nivel, fecha = await obtener_nivel()
+        if nivel is not None and nivel < ALERTA_UMBRAL:
+            info = interpretar_nivel(nivel)
+            if fecha is not None:
+                fecha_local = fecha.astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+            else:
+                fecha_local = "sin fecha"
+            mensaje = (
+                f"🚨 *Alerta de nivel bajo (San Fernando)*\n"
+                f"Nivel actual: *{nivel:.2f} m*\n"
+                f"{info}\n"
+                f"Hora: {fecha_local}"
+            )
+            await app.bot.send_message(chat_id=CHAT_ID, text=mensaje, parse_mode="Markdown")
+
+        # espera 30 minutos
+        await asyncio.sleep(1800)
+
+# --------------------------------------------------------------------------
+# 5) ARRANQUE DEL BOT
+# --------------------------------------------------------------------------
 async def main():
     app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
     app_telegram.add_handler(CommandHandler("nivel", comando_nivel))
 
+    # tarea en paralelo
     asyncio.create_task(monitorear_nivel(app_telegram))
+
     await app_telegram.run_polling()
 
-# --- Ejecutar todo ---
+# --------------------------------------------------------------------------
+# 6) EJECUCIÓN (Render-friendly)
+# --------------------------------------------------------------------------
 if __name__ == "__main__":
     import nest_asyncio
-    nest_asyncio.apply()  # <-- Esto permite reusar loops existentes sin conflictos
+    nest_asyncio.apply()
+
+    # levantamos Flask en un hilo para que Render tenga un puerto abierto
+    import threading
+    threading.Thread(
+        target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
+        daemon=True
+    ).start()
 
     try:
-        asyncio.get_event_loop().create_task(main())
-        asyncio.get_event_loop().run_forever()
+        loop = asyncio.get_event_loop()
+        loop.create_task(main())
+        loop.run_forever()
     except KeyboardInterrupt:
         pass
