@@ -6,6 +6,16 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]  # envía logs al output de Render
+)
+logger = logging.getLogger(__name__)
+
 # --- Configuración segura ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))  # configurado en Render como variable de entorno
@@ -41,15 +51,17 @@ async def obtener_nivel():
     url = f"https://www.hidro.gob.ar/api/v1/AlturasHorarias/{MAREOGRAFO}/{fecha_str}"
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                if response.status != 200:
-                    print(f"Error HTTP {response.status} al consultar {url}")
-                    return None, None
-                data = await response.json()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as response:
+            logger.info(f"Llamando a {url}")
+            if response.status != 200:
+                logger.error(f"Error HTTP {response.status} al consultar {url}")
+                return None, None
+            data = await response.json()
     except Exception as e:
-        print(f"Error obteniendo nivel desde SHN: {e}")
+        logger.exception(f"Error obteniendo nivel desde SHN: {e}")
         return None, None
+
 
     # El JSON tiene dos listas: "astronomica" y "lecturas"
     lecturas = data.get("lecturas") or []
