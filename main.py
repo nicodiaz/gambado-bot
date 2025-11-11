@@ -50,19 +50,25 @@ async def obtener_nivel():
 
     for intento in range(2):  # reintenta una vez
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=20) as response:
-                    logger.info(f"[{intento+1}] Llamando a {url}")
+            timeout = aiohttp.ClientTimeout(total=35)  # ⏱️ más margen
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, ssl=False) as response:
+                    logger.info(f"[{intento+1}] Llamando a {url} ... status={response.status}")
+
                     if response.status != 200:
                         logger.warning(f"HTTP {response.status} en intento {intento+1}")
-                        # Si la hora no tiene datos, probamos 30 min antes
                         if intento == 0:
+                            # reintento 30 min antes por si la hora exacta no tiene lectura
                             ahora_ar -= timedelta(minutes=30)
                             fecha_str = ahora_ar.strftime("%Y%m%d%H%M")
                             url = f"https://www.hidro.gob.ar/api/v1/AlturasHorarias/{MAREOGRAFO}/{fecha_str}"
+                        await asyncio.sleep(2)
                         continue
 
-                    data = await response.json()
+                    # leemos como texto y parseamos JSON manualmente (más robusto)
+                    text = await response.text()
+                    data = await asyncio.to_thread(lambda: __import__('json').loads(text))
+
                     lecturas = data.get("lecturas", [])
                     if not lecturas:
                         logger.warning("Respuesta sin lecturas.")
@@ -72,12 +78,16 @@ async def obtener_nivel():
                     nivel = ultima.get("altura")
                     fecha_str_json = ultima.get("fecha")
                     fecha_dt = datetime.fromisoformat(fecha_str_json)
+
+                    logger.info(f"Nivel obtenido: {nivel} m a las {fecha_dt}")
                     return float(nivel), fecha_dt
 
         except asyncio.TimeoutError:
             logger.warning(f"Timeout al consultar {url} (intento {intento+1})")
+            await asyncio.sleep(2)
         except Exception as e:
             logger.exception(f"Error obteniendo nivel desde SHN (intento {intento+1}): {e}")
+            await asyncio.sleep(2)
 
     logger.error("No se pudo obtener el nivel del agua tras varios intentos.")
     return None, None
