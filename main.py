@@ -26,7 +26,7 @@ PORT = int(os.getenv("PORT", 10000))
 MAREOGRAFO = "SFER"
 
 # --- Umbral de alerta (ajustá a tu lancha) ---
-ALERTA_UMBRAL = os.getenv("ALERTA_UMBRAL")  # metros aprox
+ALERTA_UMBRAL = float(os.getenv("ALERTA_UMBRAL"))  # metros aprox
 
 # --- Flask (para Render) ---
 app_flask = Flask(__name__)
